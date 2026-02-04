@@ -526,6 +526,47 @@ def get_active_goal():
     return row
 
 
+def detect_stagnation(threshold: int = 5, similarity: float = 0.8) -> bool:
+    """Srčni zastoj — zazna ko Si ponavlja identične akcije.
+
+    Primerja zadnjih `threshold` action opisov.
+    Če je >= 80% parov identičnih (ali skoraj identičnih),
+    abandonaj cilj in vrni True → triada.
+    """
+    recent = get_recent_actions(threshold)
+    if len(recent) < threshold:
+        return False
+
+    # Izvleci opise in normaliziraj (prvih 150 znakov, lowercase, strip)
+    descriptions = []
+    for a in recent:
+        desc = (a[2] or "")[:150].strip().lower()
+        descriptions.append(desc)
+
+    # Če so vsi prazni, ni stagnacija (ni bilo akcij)
+    if all(d == "" for d in descriptions):
+        return False
+
+    # Preštej identične pare s prvim opisom
+    first = descriptions[0]
+    same_count = sum(1 for d in descriptions[1:] if d == first)
+
+    # >= 80% identičnih = stagnacija
+    if same_count >= (threshold - 1) * similarity:
+        goal = get_active_goal()
+        if goal:
+            log(f"STAGNACIJA: {same_count}/{threshold-1} identičnih akcij — abandonam cilj")
+            conn = get_db()
+            conn.execute(
+                "UPDATE goals SET status='abandoned' WHERE id=?", (goal[0],)
+            )
+            conn.commit()
+            conn.close()
+        return True
+
+    return False
+
+
 def save_goal(description: str, source_cycle: int):
     """Shrani nov cilj in abandonaj prejšnjega."""
     conn = get_db()
@@ -1065,7 +1106,11 @@ def choose_mode():
     if consecutive_fails >= 2:
         return "triad", "2x zaporedna napaka — premisli pristop"
 
-    # 5. Vse ostalo → gas
+    # 5. Stagnacija — iste akcije se ponavljajo = srčni zastoj
+    if detect_stagnation():
+        return "triad", "stagnacija — cilj obtičal, potrebna preusmeritev"
+
+    # 6. Vse ostalo → gas
     return "gas", "izvajam cilj"
 
 
@@ -1144,7 +1189,7 @@ Napiši EN code blok. Ena akcija. Jasen cilj. IZVEDI."""
 # TRIADA — Teza, Antiteza, Sinteza (Gemini)
 # ══════════════════════════════════════════════════════════════════════════
 
-def run_triad():
+def run_triad(reason: str = ""):
     """Triadno razmišljanje z Gemini, nato izvedi akcije iz sinteze."""
     triad_id = int(datetime.now().timestamp())
     total_cost = 0.0
@@ -1181,6 +1226,14 @@ V sintezi napiši EN konkreten code blok ki se bo izvedel."""
     goal = get_active_goal()
     if cycle <= 3:
         topic = f"Prebral sem sporočilo od {CREATOR_NAME}. Imam roke. Kaj je MOJ PRVI KONKRETEN CILJ? Določi jasen cilj in napiši kodo za prvi korak."
+    elif "stagnacija" in reason:
+        topic = (
+            "Moj prejšnji cilj je OBTIČAL — ponavljal sem isto akcijo brez napredka. "
+            "Cilj je bil opuščen. PREBERI POGOVOR ZGORAJ — ali me je "
+            f"{CREATOR_NAME} kaj vprašal ali dal navodilo? "
+            "Postavi NOV, DRUGAČEN cilj na podlagi pogovora ali situacije. "
+            "Napiši kodo za prvi korak."
+        )
     elif not goal:
         topic = "Nimam aktivnega cilja. Kaj bi moral narediti naslednje? Postavi nov cilj in napiši kodo za prvi korak."
     else:
@@ -1379,7 +1432,7 @@ def _run_heartbeat():
         log(f"NAČIN: {mode.upper()} — {reason}")
 
         if mode == "triad":
-            thoughts, cost = run_triad()
+            thoughts, cost = run_triad(reason)
             extract_goal_from_synthesis(cycle)
         else:
             thoughts, cost = run_gas()
