@@ -1070,6 +1070,33 @@ V sintezi napiši EN konkreten code blok ki se bo izvedel."""
     return total_thoughts, total_cost
 
 
+def evaluate_goal(cycle: int):
+    """Po gas ciklu preveri ali je cilj dosežen."""
+    goal = get_active_goal()
+    if not goal:
+        return
+
+    # Poglej zadnjo akcijo
+    recent = get_recent_actions(1)
+    if not recent:
+        return
+
+    last_action = recent[0]
+    status = "USPEH" if last_action[3] else "NEUSPEH"
+    action_desc = last_action[2][:300] if last_action[2] else ""
+
+    prompt = (
+        f"Cilj: {goal[1]}\n"
+        f"Zadnja akcija: {status} — {action_desc}\n\n"
+        f"Ali je ta cilj DOSEŽEN? Odgovori SAMO z DA ali NE."
+    )
+
+    result, _ = call_gemini(prompt)
+    if result and "DA" in result["content"].strip().upper()[:10]:
+        complete_goal(goal[0], cycle)
+        log(f"CILJ DOSEŽEN: {goal[1][:80]}")
+
+
 def extract_goal_from_synthesis(cycle: int):
     """Po triadi izvleci cilj iz zadnje sinteze."""
     conn = get_db()
@@ -1171,6 +1198,7 @@ def _run_heartbeat():
             extract_goal_from_synthesis(cycle)
         else:
             thoughts, cost = run_gas()
+            evaluate_goal(cycle)
 
         # Preštej akcije
         conn = get_db()
