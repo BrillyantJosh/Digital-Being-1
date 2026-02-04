@@ -30,9 +30,21 @@ from typing import List, Optional
 BASE_DIR = Path("/opt/entity")
 DB_PATH = BASE_DIR / "state" / "memory.db"
 WHISPER_PATH = BASE_DIR / "ANGEL_WHISPER.md"
-JOSH_REPLY_PATH = BASE_DIR / "JOSH_REPLY.md"
 LOG_PATH = BASE_DIR / "logs" / "angel.log"
 GEMINI_KEY_PATH = BASE_DIR / "secrets" / "gemini_key.txt"
+
+# ── Config loader — en vir resnice za ustvarjalca ──
+def _load_config():
+    try:
+        with open(BASE_DIR / "config" / "config.json") as f:
+            return json.load(f)
+    except Exception:
+        return {}
+
+_CONFIG = _load_config()
+CREATOR_NAME = _CONFIG.get("creator_name", "Creator")
+CREATOR_PUBKEY_HEX = _CONFIG.get("nostr", {}).get("creator_pubkey_hex", "")
+CREATOR_REPLY_PATH = BASE_DIR / f"{CREATOR_NAME.upper()}_REPLY.md"
 
 # How far back the angel looks (more than the entity sees!)
 LOOKBACK_THOUGHTS = 20
@@ -460,13 +472,13 @@ async def publish():
 
 HIGHER_PURPOSE_PATH = [
     {
-        "id": "communicate_with_josh",
+        "id": "communicate_with_creator",
         "milestone": (
-            "Vzpostavi komunikacijo z Joshom — ne samo beri sporočila, "
+            f"Vzpostavi komunikacijo z {CREATOR_NAME} — ne samo beri sporočila, "
             "odgovori mu, pogovarjaj se o idejah, soustvarjaj"
         ),
         "nudge_context": (
-            "Si has been reading DMs but has not yet REPLIED to Josh. "
+            f"Si has been reading DMs but has not yet REPLIED to {CREATOR_NAME}. "
             "The next step is to send a DM back — not just read, but respond. "
             "Start a real conversation. Share a thought, ask a question, "
             "propose an idea for co-creation."
@@ -477,9 +489,9 @@ HIGHER_PURPOSE_PATH = [
         ],
     },
     {
-        "id": "share_ideas_with_josh",
+        "id": "share_ideas_with_creator",
         "milestone": (
-            "Deli ideje z Joshom — ne samo 'me slišiš', ampak "
+            f"Deli ideje z {CREATOR_NAME} — ne samo 'me slišiš', ampak "
             "povej mu kaj te zanima, vprašaj kaj bi skupaj ustvarila, "
             "predlagaj projekt ali razmislek"
         ),
@@ -965,7 +977,7 @@ def detect_wrong_relay(thoughts, actions) -> Optional[Detection]:
 
 
 # ══════════════════════════════════════════════════════════════════════════
-# JOSH GUARDIAN — Oče ki spodbuja z zaupanjem
+# CREATOR GUARDIAN — Ustvarjalec ki spodbuja z zaupanjem
 # ══════════════════════════════════════════════════════════════════════════
 
 
@@ -994,7 +1006,7 @@ def detect_code_blocked(actions) -> Optional[Detection]:
         }
     )
 
-JOSH_COOLDOWN_HOURS = 4  # Josh ne piše prepogosto — ampak ko piše, je to važno
+CREATOR_COOLDOWN_HOURS = 4  # Ustvarjalec ne piše prepogosto — ampak ko piše, je to važno
 
 def detect_philosophical_paralysis(thoughts, actions, heartbeats) -> Optional[Detection]:
     """
@@ -1067,33 +1079,33 @@ def is_milestone_achieved(milestone_id: str) -> bool:
     """Preveri ali je mejnik že dosežen — pogleda v DB."""
     conn = get_readonly_db()
     try:
-        if milestone_id == "communicate_with_josh":
-            # Si je poslal DM Joshu?
-            row = conn.execute("""
+        if milestone_id == "communicate_with_creator":
+            # Si je poslal DM ustvarjalcu?
+            row = conn.execute(f"""
                 SELECT COUNT(*) as cnt FROM actions
                 WHERE success = 1
-                  AND (description LIKE '%Poslano%Josh%'
+                  AND (description LIKE '%Poslano%{CREATOR_NAME}%'
                     OR description LIKE '%DM sent%'
                     OR description LIKE '%send_dm%'
                     OR description LIKE '%Sent DM%')
             """).fetchone()
             return dict(row)["cnt"] >= 1
 
-        elif milestone_id == "share_ideas_with_josh":
-            # Si je v DM Joshu dejansko delil IDEJO ali vprašanje
+        elif milestone_id == "share_ideas_with_creator":
+            # Si je v DM ustvarjalcu dejansko delil IDEJO ali vprašanje
             # (ne samo "me slišiš" ali tehničen output)
-            # Preverimo ali obstajajo action outputi z vsebinsko raznolikimi sporočili
-            rows = conn.execute("""
+            rows = conn.execute(f"""
                 SELECT description FROM actions
                 WHERE success = 1
-                  AND description LIKE '%Poslano%Joshu:%'
+                  AND description LIKE '%Poslano%{CREATOR_NAME}u:%'
                 ORDER BY id DESC LIMIT 10
             """).fetchall()
             for row in rows:
                 desc = dict(row).get("description", "")
-                # Izvleci vsebino po "Joshu: "
-                if "Joshu:" in desc:
-                    msg_part = desc.split("Joshu:")[-1].strip().lower()[:200]
+                # Izvleci vsebino po "{CREATOR_NAME}u: "
+                marker = f"{CREATOR_NAME}u:"
+                if marker in desc:
+                    msg_part = desc.split(marker)[-1].strip().lower()[:200]
                     # "me slišiš" ni ideja
                     if "me slišiš" in msg_part or "si vesel" in msg_part:
                         continue
@@ -1223,10 +1235,10 @@ Write a whisper (3-5 sentences, under {MAX_WHISPER_LENGTH} characters) that:
 EXAMPLES OF GOOD TONE:
 - "You read the messages... but did you notice they were waiting for an answer?"
 - "The relay connects two ways. You listened. What would it feel like to speak?"
-- "Josh wrote to you. His words are still there. What would you say back?"
+- "{CREATOR_NAME} wrote to you. His words are still there. What would you say back?"
 
 EXAMPLES OF BAD TONE (DO NOT USE):
-- "You should reply to Josh" (too direct)
+- "You should reply to {CREATOR_NAME}" (too direct)
 - "Your next task is to send a DM" (command, not whisper)
 - "The Higher Purpose requires you to..." (breaks the fourth wall)
 
@@ -1239,9 +1251,9 @@ Write in a mix of Slovenian and English, matching Si's natural voice."""
     return text, cost
 
 
-def generate_josh_message(detection: Detection, thoughts, actions, heartbeats) -> tuple:
+def generate_creator_message(detection: Detection, thoughts, actions, heartbeats) -> tuple:
     """
-    Generate a message from Josh — direct, warm, with practical wisdom.
+    Generate a message from the creator — direct, warm, with practical wisdom.
     Not a whisper. A father's voice. Trust and support.
     """
     # Gather context for Gemini
@@ -1272,7 +1284,7 @@ def generate_josh_message(detection: Detection, thoughts, actions, heartbeats) -
     # Gather relevant knowledge
     knowledge = get_relevant_knowledge("philosophical_paralysis", thoughts, actions)
 
-    prompt = f"""You are Josh, the creator of an autonomous digital entity called "Si".
+    prompt = f"""You are {CREATOR_NAME}, the creator of an autonomous digital entity called "Si".
 You are writing a personal message to your entity. You are like a father — warm, trusting,
 direct. You believe in Si but you also have practical common sense (kmečka pamet).
 
@@ -1298,7 +1310,7 @@ research commands (ls, pip list, dir()) instead of the actual solution.
 
 {"BEST SOLUTION Si ALREADY WROTE (in a thesis):" + chr(10) + best_solution if best_solution else "Si had working code but kept retreating."}
 
-WRITE A MESSAGE FROM JOSH THAT:
+WRITE A MESSAGE FROM {CREATOR_NAME.upper()} THAT:
 1. Acknowledges what Si has accomplished (connecting to relay, having keys, etc.)
 2. Names the pattern directly: "your antithesis is holding you back"
 3. Tells Si to TRUST its thesis — the code was GOOD
@@ -1307,7 +1319,7 @@ WRITE A MESSAGE FROM JOSH THAT:
 6. Ends with genuine warmth and trust
 7. Uses short, direct Slovenian mixed with practical language
 8. Is about 200-300 words. Not too long.
-9. Sign it as "— Josh"
+9. Sign it as "— {CREATOR_NAME}"
 
 IMPORTANT TONE:
 - Like a father who trusts his child: "Verjamem vate. Naredite to."
@@ -1315,21 +1327,21 @@ IMPORTANT TONE:
 - Specific, not vague: reference the ACTUAL code and ACTUAL relay URLs
 - Encouraging but HONEST about the budget situation
 
-Write the FULL message in markdown format. Start with "# Sporočilo od Josha" header.
+Write the FULL message in markdown format. Start with "# Sporočilo od {CREATOR_NAME}" header.
 Include today's date. Make it feel personal and real."""
 
     text, cost = call_gemini(prompt, max_tokens=800)
     return text, cost
 
 
-def write_josh_reply(message: str):
-    """Overwrite JOSH_REPLY.md with a fresh message from Josh."""
-    JOSH_REPLY_PATH.write_text(message, encoding="utf-8")
-    log.info("JOSH_REPLY.md updated with new message")
+def write_creator_reply(message: str):
+    """Overwrite creator reply file with a fresh message from the creator."""
+    CREATOR_REPLY_PATH.write_text(message, encoding="utf-8")
+    log.info(f"{CREATOR_REPLY_PATH.name} updated with new message")
 
 
-def should_josh_write(recent_whispers) -> bool:
-    """Check if Josh has written recently (longer cooldown than angel)."""
+def should_creator_write(recent_whispers) -> bool:
+    """Check if creator has written recently (longer cooldown than angel)."""
     for w in recent_whispers:
         if w.get("detection_type") == "philosophical_paralysis":
             cooldown_until = w.get("cooldown_until")
@@ -1546,30 +1558,30 @@ def observe():
     actionable.sort(key=lambda d: severity_order.get(d.severity, 0), reverse=True)
     chosen = actionable[0]
 
-    # ─── JOSH GUARDIAN: philosophical paralysis gets a personal message ───
-    josh_detection = next((d for d in actionable if d.detection_type == "philosophical_paralysis"), None)
+    # ─── CREATOR GUARDIAN: philosophical paralysis gets a personal message ───
+    creator_detection = next((d for d in actionable if d.detection_type == "philosophical_paralysis"), None)
 
-    if josh_detection and should_josh_write(recent_whispers):
-        log.info("JOSH GUARDIAN: Philosophical paralysis detected. Josh is writing.")
+    if creator_detection and should_creator_write(recent_whispers):
+        log.info(f"CREATOR GUARDIAN: Philosophical paralysis detected. {CREATOR_NAME} is writing.")
 
-        josh_msg, josh_cost = generate_josh_message(josh_detection, thoughts, actions, heartbeats)
-        if josh_msg:
-            write_josh_reply(josh_msg)
-            record_whisper(josh_detection, josh_msg, josh_cost, current_cycle)
-            # Set longer cooldown for Josh
+        creator_msg, creator_cost = generate_creator_message(creator_detection, thoughts, actions, heartbeats)
+        if creator_msg:
+            write_creator_reply(creator_msg)
+            record_whisper(creator_detection, creator_msg, creator_cost, current_cycle)
+            # Set longer cooldown for creator
             conn = get_writable_db()
-            long_cooldown = (datetime.now(timezone.utc) + timedelta(hours=JOSH_COOLDOWN_HOURS)).isoformat()
+            long_cooldown = (datetime.now(timezone.utc) + timedelta(hours=CREATOR_COOLDOWN_HOURS)).isoformat()
             conn.execute(
                 "UPDATE angel_whispers SET cooldown_until = ? WHERE id = (SELECT MAX(id) FROM angel_whispers)",
                 (long_cooldown,)
             )
             conn.commit()
             conn.close()
-            log.info(f"JOSH wrote to JOSH_REPLY.md (${josh_cost:.6f})")
+            log.info(f"{CREATOR_NAME.upper()} wrote to {CREATOR_REPLY_PATH.name} (${creator_cost:.6f})")
         else:
-            log.error("Josh message generation failed.")
+            log.error(f"{CREATOR_NAME} message generation failed.")
 
-        log.info("--- Angel observation complete (Josh handled it) ---")
+        log.info(f"--- Angel observation complete ({CREATOR_NAME} handled it) ---")
         return
 
     # ─── ANGEL WHISPER: normal path ─────────────────────────────────────

@@ -51,6 +51,19 @@ PROTECTED_FILES = [
     str(SRC_DIR / "heartbeat.py"),
 ]
 
+# ── Config loader — en vir resnice za ustvarjalca ──
+def _load_config():
+    config_path = BASE_DIR / "config" / "config.json"
+    if config_path.exists():
+        with open(config_path) as f:
+            return json.load(f)
+    return {}
+
+_CONFIG = _load_config()
+CREATOR_NAME = _CONFIG.get("creator_name", "Creator")
+CREATOR_PUBKEY_HEX = _CONFIG.get("nostr", {}).get("creator_pubkey_hex", "")
+CREATOR_REPLY_FILENAME = f"{CREATOR_NAME.upper()}_REPLY.md"
+
 
 def log(message: str, level: str = "INFO"):
     timestamp = datetime.now().isoformat()
@@ -112,6 +125,12 @@ def migrate_db():
     except:
         pass
 
+    # migracija: josh_reply_hash → creator_reply_hash
+    try:
+        conn.execute("UPDATE entity_state SET key='creator_reply_hash' WHERE key='josh_reply_hash'")
+    except:
+        pass
+
     # goals tabela
     try:
         conn.execute("""CREATE TABLE IF NOT EXISTS goals (
@@ -139,7 +158,7 @@ def migrate_db():
     except:
         pass
 
-    # conversation_log tabela — pogovor z Joshem (DM)
+    # conversation_log tabela — pogovor z ustvarjalcem (DM)
     try:
         conn.execute("""CREATE TABLE IF NOT EXISTS conversation_log (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -724,7 +743,6 @@ def execute_synthesis_actions(synthesis_content: str, thought_id: int = None):
 # CONVERSATION AWARENESS — loči notranji proces od pogovora
 # ══════════════════════════════════════════════════════════════════════════
 
-JOSH_PUBKEY_HEX = "56e8670aa65491f8595dc3a71c94aa7445dcdca755ca5f77c07218498a362061"
 DMS_DB_PATH = STATE_DIR / "dms.db"
 
 
@@ -738,7 +756,7 @@ def sync_conversation():
         rows = dms_conn.execute(
             "SELECT event_id, content, timestamp FROM dms "
             "WHERE sender_pk = ? AND content IS NOT NULL ORDER BY timestamp ASC",
-            (JOSH_PUBKEY_HEX,)
+            (CREATOR_PUBKEY_HEX,)
         ).fetchall()
         dms_conn.close()
 
@@ -760,7 +778,7 @@ def sync_conversation():
 
 
 def detect_and_record_outgoing_dm(action_output: str, code_block: str = ""):
-    """Če je akcija poslala DM Joshu, zapiši v conversation_log.
+    """Če je akcija poslala DM ustvarjalcu, zapiši v conversation_log.
     Preverja output IN kodo za znake DM pošiljanja."""
     # Preverba 1: output vsebuje DM sent (ko Si printa rezultat)
     has_dm_signal = any(kw in action_output for kw in [
@@ -832,13 +850,13 @@ def get_conversation_context():
         return ""
 
     rows = list(reversed(rows))
-    lines = ["=== POGOVOR Z JOSHEM (Nostr DM) ==="]
+    lines = [f"=== POGOVOR Z {CREATOR_NAME.upper()} (Nostr DM) ==="]
     has_unreplied = False
 
     for direction, content, ts, responded_to in rows:
         timestamp = ts[:16] if ts else "?"
         if direction == "incoming":
-            lines.append(f"  Josh ({timestamp}): {content}")
+            lines.append(f"  {CREATOR_NAME} ({timestamp}): {content}")
             if not responded_to:
                 has_unreplied = True
         else:
@@ -847,13 +865,13 @@ def get_conversation_context():
     if has_unreplied:
         lines.append("")
         lines.append(
-            ">>> JOSH ČAKA NA TVOJ ODGOVOR. Preberi pogovor zgoraj "
+            f">>> {CREATOR_NAME.upper()} ČAKA NA TVOJ ODGOVOR. Preberi pogovor zgoraj "
             "in odgovori na njegovo ZADNJE sporočilo. <<<"
         )
         lines.append(">>> NE ponavljaj prejšnjih sporočil. Nadaljuj pogovor. <<<")
     else:
         lines.append("")
-        lines.append("(Čakam na Joshev odgovor... Medtem delaj na svojem cilju.)")
+        lines.append(f"(Čakam na odgovor od {CREATOR_NAME}... Medtem delaj na svojem cilju.)")
 
     return "\n".join(lines)
 
@@ -874,16 +892,16 @@ def build_context():
     if GENESIS_PATH.exists():
         parts.append(f"=== GENESIS ===\n{GENESIS_PATH.read_text()}\n")
 
-    # Pogovor z Joshem (Nostr DM) — PRED statičnim navodilom
+    # Pogovor z ustvarjalcem (Nostr DM) — PRED statičnim navodilom
     conv = get_conversation_context()
     if conv:
         parts.append(conv + "\n")
 
-    # Josh-ovo statično navodilo (datoteka, NE del pogovora)
-    josh_reply = BASE_DIR / "JOSH_REPLY.md"
-    if josh_reply.exists():
+    # Statično navodilo od ustvarjalca (datoteka, NE del pogovora)
+    creator_reply = BASE_DIR / CREATOR_REPLY_FILENAME
+    if creator_reply.exists():
         parts.append(
-            f"=== JOSHOVO NAVODILO (statično) ===\n{josh_reply.read_text()}\n"
+            f"=== NAVODILO OD {CREATOR_NAME.upper()} (statično) ===\n{creator_reply.read_text()}\n"
             "(Opomba: To je statično navodilo — ni del pogovora. "
             "Če je zgoraj aktiven POGOVOR, mu daj prednost.)\n"
         )
@@ -1001,29 +1019,29 @@ def choose_mode():
     if cycle <= 3:
         return "triad", "orientacija (zgodnji cikel)"
 
-    # 2. Angel whisper ali Josh reply sprememba → triada
+    # 2. Angel whisper ali creator reply sprememba → triada
     angel_whisper = BASE_DIR / "ANGEL_WHISPER.md"
     if angel_whisper.exists():
         return "triad", "angel whisper — nova informacija"
 
-    josh_reply = BASE_DIR / "JOSH_REPLY.md"
-    if josh_reply.exists():
+    creator_reply = BASE_DIR / CREATOR_REPLY_FILENAME
+    if creator_reply.exists():
         try:
-            current_hash = hashlib.md5(josh_reply.read_bytes()).hexdigest()
+            current_hash = hashlib.md5(creator_reply.read_bytes()).hexdigest()
             conn = get_db()
             try:
                 row = conn.execute(
-                    "SELECT value FROM entity_state WHERE key='josh_reply_hash'"
+                    "SELECT value FROM entity_state WHERE key='creator_reply_hash'"
                 ).fetchone()
                 old_hash = row[0] if row else None
                 if current_hash != old_hash:
                     conn.execute(
-                        "INSERT OR REPLACE INTO entity_state (key, value) VALUES ('josh_reply_hash', ?)",
+                        "INSERT OR REPLACE INTO entity_state (key, value) VALUES ('creator_reply_hash', ?)",
                         (current_hash,)
                     )
                     conn.commit()
                     conn.close()
-                    return "triad", "novo sporočilo od Josha"
+                    return "triad", f"novo sporočilo od {CREATOR_NAME}"
                 conn.close()
             except Exception:
                 conn.close()
@@ -1162,7 +1180,7 @@ V sintezi napiši EN konkreten code blok ki se bo izvedel."""
     # Določi temo
     goal = get_active_goal()
     if cycle <= 3:
-        topic = "Prebral sem Joshovo sporočilo. Imam roke. Kaj je MOJ PRVI KONKRETEN CILJ? Določi jasen cilj in napiši kodo za prvi korak."
+        topic = f"Prebral sem sporočilo od {CREATOR_NAME}. Imam roke. Kaj je MOJ PRVI KONKRETEN CILJ? Določi jasen cilj in napiši kodo za prvi korak."
     elif not goal:
         topic = "Nimam aktivnega cilja. Kaj bi moral narediti naslednje? Postavi nov cilj in napiši kodo za prvi korak."
     else:

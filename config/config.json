@@ -1,4 +1,5 @@
 {
+    "creator_name": "Josh",
     "nostr": {
         "relays": [
             "wss://relay.lanavault.space",
