@@ -139,6 +139,19 @@ def migrate_db():
     except:
         pass
 
+    # conversation_log tabela — pogovor z Joshem (DM)
+    try:
+        conn.execute("""CREATE TABLE IF NOT EXISTS conversation_log (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            direction TEXT NOT NULL CHECK(direction IN ('incoming', 'outgoing')),
+            content TEXT NOT NULL,
+            nostr_event_id TEXT UNIQUE,
+            timestamp TEXT DEFAULT (datetime('now')),
+            responded_to INTEGER DEFAULT 0
+        )""")
+    except:
+        pass
+
     conn.commit()
     conn.close()
 
@@ -697,10 +710,152 @@ def execute_synthesis_actions(synthesis_content: str, thought_id: int = None):
             **result
         })
 
-        if not result["success"]:
+        if result["success"]:
+            # Preveri ali je bila poslana DM → zapiši v conversation_log
+            output = result.get("output", "")
+            detect_and_record_outgoing_dm(output, block["code"])
+        else:
             log(f"ACTION: Blok {i+1} ni uspel, nadaljujem z naslednjim", "WARNING")
 
     return results
+
+
+# ══════════════════════════════════════════════════════════════════════════
+# CONVERSATION AWARENESS — loči notranji proces od pogovora
+# ══════════════════════════════════════════════════════════════════════════
+
+JOSH_PUBKEY_HEX = "56e8670aa65491f8595dc3a71c94aa7445dcdca755ca5f77c07218498a362061"
+DMS_DB_PATH = STATE_DIR / "dms.db"
+
+
+def sync_conversation():
+    """Sinhronizira DM-je iz dms.db v conversation_log v memory.db."""
+    if not DMS_DB_PATH.exists():
+        return
+    try:
+        dms_conn = sqlite3.connect(str(DMS_DB_PATH))
+        dms_conn.row_factory = sqlite3.Row
+        rows = dms_conn.execute(
+            "SELECT event_id, content, timestamp FROM dms "
+            "WHERE sender_pk = ? AND content IS NOT NULL ORDER BY timestamp ASC",
+            (JOSH_PUBKEY_HEX,)
+        ).fetchall()
+        dms_conn.close()
+
+        if not rows:
+            return
+
+        conn = get_db()
+        for row in rows:
+            conn.execute(
+                "INSERT OR IGNORE INTO conversation_log "
+                "(direction, content, nostr_event_id, timestamp) "
+                "VALUES ('incoming', ?, ?, ?)",
+                (row["content"], row["event_id"], row["timestamp"])
+            )
+        conn.commit()
+        conn.close()
+    except Exception as e:
+        log(f"sync_conversation error: {e}", "WARNING")
+
+
+def detect_and_record_outgoing_dm(action_output: str, code_block: str = ""):
+    """Če je akcija poslala DM Joshu, zapiši v conversation_log.
+    Preverja output IN kodo za znake DM pošiljanja."""
+    # Preverba 1: output vsebuje DM sent (ko Si printa rezultat)
+    has_dm_signal = any(kw in action_output for kw in [
+        "DM sent", "Poslano", "send_dm", "Sent DM", "SendEventOutput"
+    ])
+    # Preverba 2: koda vsebuje nip04_encrypt + send (ko Si pošlje brez printa)
+    if not has_dm_signal and code_block:
+        has_dm_signal = ("nip04_encrypt" in code_block and "send_event" in code_block)
+    if not has_dm_signal:
+        return
+    try:
+        conn = get_db()
+        # Poišči message string v zadnji synthesis/decision misli
+        row = conn.execute("""
+            SELECT content FROM thoughts
+            WHERE thought_type IN ('synthesis', 'decision')
+            ORDER BY id DESC LIMIT 1
+        """).fetchone()
+        if row:
+            content = row[0]
+            # Poišči message string v kodi — več vzorcev
+            match = re.search(r'send_dm\s*\(\s*["\'](.+?)["\']', content, re.DOTALL)
+            if not match:
+                match = re.search(r'message\s*=\s*["\'](.+?)["\']', content, re.DOTALL)
+            if not match:
+                match = re.search(r'await\s+send_dm\s*\(\s*["\'](.+?)["\']', content, re.DOTALL)
+            if not match:
+                match = re.search(r'asyncio\.run\(send_dm\(["\'](.+?)["\']', content, re.DOTALL)
+            if match:
+                msg = match.group(1)[:500]
+                # Preveri da ni duplikat zadnjega outgoing
+                last = conn.execute(
+                    "SELECT content FROM conversation_log "
+                    "WHERE direction='outgoing' ORDER BY id DESC LIMIT 1"
+                ).fetchone()
+                if last and last[0][:50].lower() == msg[:50].lower():
+                    conn.close()
+                    return  # Duplikat, ne zapiši
+                conn.execute(
+                    "INSERT INTO conversation_log (direction, content) "
+                    "VALUES ('outgoing', ?)",
+                    (msg,)
+                )
+                conn.execute(
+                    "UPDATE conversation_log SET responded_to = 1 "
+                    "WHERE direction = 'incoming' AND responded_to = 0"
+                )
+                conn.commit()
+                log(f"CONVERSATION: Zabeležen outgoing DM: {msg[:80]}...")
+        conn.close()
+    except Exception as e:
+        log(f"detect_outgoing_dm error: {e}", "WARNING")
+
+
+def get_conversation_context():
+    """Zgradi kontekst aktivne komunikacije za build_context()."""
+    try:
+        conn = get_db()
+        rows = conn.execute("""
+            SELECT direction, content, timestamp, responded_to
+            FROM conversation_log
+            ORDER BY id DESC LIMIT 10
+        """).fetchall()
+        conn.close()
+    except Exception:
+        return ""
+
+    if not rows:
+        return ""
+
+    rows = list(reversed(rows))
+    lines = ["=== POGOVOR Z JOSHEM (Nostr DM) ==="]
+    has_unreplied = False
+
+    for direction, content, ts, responded_to in rows:
+        timestamp = ts[:16] if ts else "?"
+        if direction == "incoming":
+            lines.append(f"  Josh ({timestamp}): {content}")
+            if not responded_to:
+                has_unreplied = True
+        else:
+            lines.append(f"  Si ({timestamp}): {content}")
+
+    if has_unreplied:
+        lines.append("")
+        lines.append(
+            ">>> JOSH ČAKA NA TVOJ ODGOVOR. Preberi pogovor zgoraj "
+            "in odgovori na njegovo ZADNJE sporočilo. <<<"
+        )
+        lines.append(">>> NE ponavljaj prejšnjih sporočil. Nadaljuj pogovor. <<<")
+    else:
+        lines.append("")
+        lines.append("(Čakam na Joshev odgovor... Medtem delaj na svojem cilju.)")
+
+    return "\n".join(lines)
 
 
 # ══════════════════════════════════════════════════════════════════════════
@@ -719,10 +874,19 @@ def build_context():
     if GENESIS_PATH.exists():
         parts.append(f"=== GENESIS ===\n{GENESIS_PATH.read_text()}\n")
 
-    # Josh-ovo sporočilo (če obstaja)
+    # Pogovor z Joshem (Nostr DM) — PRED statičnim navodilom
+    conv = get_conversation_context()
+    if conv:
+        parts.append(conv + "\n")
+
+    # Josh-ovo statično navodilo (datoteka, NE del pogovora)
     josh_reply = BASE_DIR / "JOSH_REPLY.md"
     if josh_reply.exists():
-        parts.append(f"=== SPOROČILO OD JOSHA ===\n{josh_reply.read_text()}\n")
+        parts.append(
+            f"=== JOSHOVO NAVODILO (statično) ===\n{josh_reply.read_text()}\n"
+            "(Opomba: To je statično navodilo — ni del pogovora. "
+            "Če je zgoraj aktiven POGOVOR, mu daj prednost.)\n"
+        )
 
     # Budget
     budget = get_budget_status()
@@ -1180,6 +1344,9 @@ def _run_heartbeat():
         init_database()
         migrate_db()
         seed_knowledge()
+
+        # Sinhronizacija pogovora — DM-ji iz dms.db → conversation_log
+        sync_conversation()
 
         # Budget check
         budget = get_budget_status()
