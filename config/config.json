@@ -4,40 +4,23 @@
             "wss://relay.lanavault.space",
             "wss://relay.lanacoin-eternity.com"
         ],
-        "creator_pubkey_hex": "56e8670aa65491f8595dc3a71c94aa7445dcdca755ca5f77c07218498a362061"
+        "creator_pubkey_hex": "56e8670aa65491f8595dc3a71c94aa7445dcdca755ca5f77c07218498a362061",
+        "dm_protocol": "NIP-04"
     },
     "models": {
-        "deep_thinking": "claude-opus-4-20250514",
-        "conversation": "gemini-2.0-flash"
+        "primary": "gemini-2.0-flash"
     },
     "budget": {
-        "opus_usd": 5.0,
         "gemini_usd": 3.0
     },
-    "heartbeat_interval_minutes": 30,
+    "heartbeat_interval_minutes": 1,
     "workspace": {
         "projects_dir": "/opt/entity/projects",
         "available_ports": [
-            8080,
-            8081,
-            8082,
-            8083,
-            8084,
-            8085,
-            8086,
-            8087,
-            8088,
-            8089,
-            8090,
-            8091,
-            8092,
-            8093,
-            8094,
-            8095,
-            8096,
-            8097,
-            8098,
-            8099
+            8080, 8081, 8082, 8083, 8084,
+            8085, 8086, 8087, 8088, 8089,
+            8090, 8091, 8092, 8093, 8094,
+            8095, 8096, 8097, 8098, 8099
         ],
         "supervisor_config": "/opt/entity/.config/supervisor/supervisord.conf",
         "domain": null

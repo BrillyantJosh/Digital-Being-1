@@ -75,11 +75,47 @@ CREATE TABLE IF NOT EXISTS heartbeats (
     thoughts_generated INTEGER DEFAULT 0,
     actions_taken INTEGER DEFAULT 0,
     cost_usd REAL DEFAULT 0.0,
-    error TEXT
+    error TEXT,
+    mode TEXT DEFAULT 'triad'
+);
+
+CREATE TABLE IF NOT EXISTS learnings (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    timestamp DATETIME DEFAULT CURRENT_TIMESTAMP,
+    category TEXT NOT NULL,
+    insight TEXT NOT NULL,
+    source_cycle INTEGER,
+    confidence REAL DEFAULT 1.0
+);
+
+CREATE TABLE IF NOT EXISTS entity_state (
+    key TEXT PRIMARY KEY,
+    value TEXT,
+    updated_at DATETIME DEFAULT CURRENT_TIMESTAMP
+);
+
+CREATE TABLE IF NOT EXISTS goals (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    timestamp DATETIME DEFAULT CURRENT_TIMESTAMP,
+    description TEXT NOT NULL,
+    status TEXT CHECK(status IN ('active', 'completed', 'failed', 'abandoned')) DEFAULT 'active',
+    source_cycle INTEGER,
+    completed_cycle INTEGER
+);
+
+CREATE TABLE IF NOT EXISTS knowledge (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    timestamp DATETIME DEFAULT CURRENT_TIMESTAMP,
+    topic TEXT NOT NULL,
+    content TEXT NOT NULL,
+    source TEXT DEFAULT 'seed'
 );
 
 CREATE INDEX IF NOT EXISTS idx_thoughts_timestamp ON thoughts(timestamp);
 CREATE INDEX IF NOT EXISTS idx_thoughts_triad ON thoughts(triad_id);
+CREATE INDEX IF NOT EXISTS idx_learnings_cat ON learnings(category);
+CREATE INDEX IF NOT EXISTS idx_goals_status ON goals(status);
+CREATE INDEX IF NOT EXISTS idx_knowledge_topic ON knowledge(topic);
 
 CREATE VIEW IF NOT EXISTS budget_status AS
 SELECT
