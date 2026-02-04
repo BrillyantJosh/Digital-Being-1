@@ -157,7 +157,7 @@ ODGOVORI KOT SI. Napiši SAMO svoj odgovor. Brez uvodov, brez navednic."""
         return None
 
     response_text = result["content"].strip()
-    save_thought("conversation_response", response_text, "gemini",
+    save_thought("reflection", response_text, "gemini",
                  tokens_in=result["tokens_in"], tokens_out=result["tokens_out"],
                  cost=result["cost"])
 
@@ -364,7 +364,8 @@ def main():
         send_pending_notifications()
 
         if not unread:
-            return  # Nič za narediti — hitro izstopi
+            comm_log("Sinhronizacija OK, ni neprebranih sporočil.")
+            return
 
         comm_log(f"{len(unread)} neprebranih sporočil")
 
