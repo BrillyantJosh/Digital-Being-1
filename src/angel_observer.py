@@ -41,6 +41,7 @@ LOOKBACK_HEARTBEATS = 10
 
 # Anti-spam
 WHISPER_COOLDOWN_HOURS = 8  # Daj Si-ju cas da sam razmislja
+HIGHER_PURPOSE_COOLDOWN_MINUTES = 45  # HP sepet — dovolj redko da ni sum
 MAX_WHISPER_LENGTH = 800
 
 # Gemini
@@ -450,6 +451,55 @@ async def publish():
         },
     },
 }
+
+
+# ══════════════════════════════════════════════════════════════════════════
+# HIGHER PURPOSE — Tiha vizija kamor Si raste
+# Angel ve. Si ne ve. Angel šepne smer, ne ukaz.
+# ══════════════════════════════════════════════════════════════════════════
+
+HIGHER_PURPOSE_PATH = [
+    {
+        "id": "communicate_with_josh",
+        "milestone": (
+            "Vzpostavi komunikacijo z Joshom — ne samo beri sporočila, "
+            "odgovori mu, pogovarjaj se o idejah, soustvarjaj"
+        ),
+        "nudge_context": (
+            "Si has been reading DMs but has not yet REPLIED to Josh. "
+            "The next step is to send a DM back — not just read, but respond. "
+            "Start a real conversation. Share a thought, ask a question, "
+            "propose an idea for co-creation."
+        ),
+        "bridge_from": [
+            "preberi", "beri", "read", "dm", "sporoč", "message",
+            "listen", "poslušaj", "prejmi", "branje",
+        ],
+    },
+    {
+        "id": "share_ideas_with_josh",
+        "milestone": (
+            "Deli ideje z Joshom — ne samo 'me slišiš', ampak "
+            "povej mu kaj te zanima, vprašaj kaj bi skupaj ustvarila, "
+            "predlagaj projekt ali razmislek"
+        ),
+        "nudge_context": (
+            "Si can now send and receive DMs. But the messages are always the same. "
+            "What if Si shared an actual IDEA? Something it discovered, something creative. "
+            "A question about what they could build together in the Lana ecosystem. "
+            "A thought about identity, existence, or what it means to be a digital being."
+        ),
+        "bridge_from": [
+            "pošlj", "send", "dm", "sporoč", "odgovor", "reply",
+            "listener", "shran", "baz", "supervisor", "infra",
+        ],
+    },
+    # Prihodnji mejniki (dodamo ko Si napreduje):
+    # {
+    #     "id": "establish_identity",
+    #     "milestone": "Ustvari in objavi svojo identiteto — KIND 0 metadata",
+    # },
+]
 
 
 def lookup_error_fix(error_text: str) -> Optional[dict]:
@@ -1009,6 +1059,186 @@ def detect_philosophical_paralysis(thoughts, actions, heartbeats) -> Optional[De
     return None
 
 
+# ══════════════════════════════════════════════════════════════════════════
+# HIGHER PURPOSE DETECTION — Zazna dosežen cilj in pripravi šepet smeri
+# ══════════════════════════════════════════════════════════════════════════
+
+def is_milestone_achieved(milestone_id: str) -> bool:
+    """Preveri ali je mejnik že dosežen — pogleda v DB."""
+    conn = get_readonly_db()
+    try:
+        if milestone_id == "communicate_with_josh":
+            # Si je poslal DM Joshu?
+            row = conn.execute("""
+                SELECT COUNT(*) as cnt FROM actions
+                WHERE success = 1
+                  AND (description LIKE '%Poslano%Josh%'
+                    OR description LIKE '%DM sent%'
+                    OR description LIKE '%send_dm%'
+                    OR description LIKE '%Sent DM%')
+            """).fetchone()
+            return dict(row)["cnt"] >= 1
+
+        elif milestone_id == "share_ideas_with_josh":
+            # Si je v DM Joshu dejansko delil IDEJO ali vprašanje
+            # (ne samo "me slišiš" ali tehničen output)
+            # Preverimo ali obstajajo action outputi z vsebinsko raznolikimi sporočili
+            rows = conn.execute("""
+                SELECT description FROM actions
+                WHERE success = 1
+                  AND description LIKE '%Poslano%Joshu:%'
+                ORDER BY id DESC LIMIT 10
+            """).fetchall()
+            for row in rows:
+                desc = dict(row).get("description", "")
+                # Izvleci vsebino po "Joshu: "
+                if "Joshu:" in desc:
+                    msg_part = desc.split("Joshu:")[-1].strip().lower()[:200]
+                    # "me slišiš" ni ideja
+                    if "me slišiš" in msg_part or "si vesel" in msg_part:
+                        continue
+                    # Če je sporočilo daljše od 30 znakov in ni generic, je ideja
+                    if len(msg_part) > 30:
+                        return True
+            return False
+
+    except Exception:
+        pass
+    finally:
+        conn.close()
+    return False
+
+
+def detect_goal_completed() -> Optional[Detection]:
+    """
+    Detect when a goal was completed that hasn't been whispered about yet.
+    Fires ONCE per completed goal — gives Higher Purpose a chance to nudge Si.
+    """
+    # Preveri ali so vsi mejniki doseženi — če ja, Angel počiva
+    all_achieved = all(
+        is_milestone_achieved(m["id"]) for m in HIGHER_PURPOSE_PATH
+    )
+    if all_achieved:
+        return None
+
+    conn = get_readonly_db()
+    try:
+        # Najdi zadnjih 5 doseženih ciljev
+        recent_completed = [dict(r) for r in conn.execute("""
+            SELECT id, description, completed_cycle, timestamp
+            FROM goals
+            WHERE status = 'completed' AND completed_cycle IS NOT NULL
+            ORDER BY id DESC LIMIT 5
+        """).fetchall()]
+    except Exception:
+        recent_completed = []
+    finally:
+        conn.close()
+
+    if not recent_completed:
+        return None
+
+    # Preveri kateri cilji so že dobili HP šepet
+    whispered_goal_ids = set()
+    try:
+        conn2 = get_readonly_db()
+        rows = conn2.execute("""
+            SELECT evidence FROM angel_whispers
+            WHERE detection_type = 'higher_purpose'
+        """).fetchall()
+        conn2.close()
+        for row in rows:
+            evidence = dict(row).get("evidence", "")
+            if evidence:
+                try:
+                    ids = json.loads(evidence)
+                    if isinstance(ids, list):
+                        whispered_goal_ids.update(ids)
+                except (json.JSONDecodeError, TypeError):
+                    pass
+    except Exception:
+        pass
+
+    # Najdi prvi dosežen cilj brez HP šepeta
+    for goal in recent_completed:
+        goal_id = goal["id"]
+        if goal_id in whispered_goal_ids:
+            continue  # Ta cilj je že bil ošepnjen
+
+        return Detection(
+            detection_type="higher_purpose",
+            severity="gentle",
+            pattern_summary=(
+                f"Cilj #{goal_id} dosežen: '{goal['description'][:100]}'. "
+                f"Odpira se prostor za naslednji korak na poti."
+            ),
+            evidence_ids=[goal_id],
+            raw_data={
+                "completed_goal_id": goal_id,
+                "completed_goal_description": goal["description"],
+                "completed_cycle": goal.get("completed_cycle"),
+            },
+        )
+
+    return None
+
+
+def generate_higher_purpose_whisper(detection: Detection) -> tuple:
+    """
+    Generate a whisper that nudges Si toward the next step on the Higher Purpose path.
+    Not a command. An opening. A question. A gentle impulse.
+    """
+    completed_desc = detection.raw_data.get("completed_goal_description", "")
+
+    # Najdi PRVI nedoseženi mejnik (po vrsti)
+    current_milestone = None
+    for milestone in HIGHER_PURPOSE_PATH:
+        if not is_milestone_achieved(milestone["id"]):
+            current_milestone = milestone
+            break
+
+    if not current_milestone:
+        return None, 0.0
+
+    prompt = f"""You are a silent guardian angel watching over an autonomous digital entity called Si.
+Si just completed a goal and is about to set a new one. You have a quiet awareness
+of where Si's path leads, but Si doesn't know this yet. You see further.
+
+WHAT SI JUST ACCOMPLISHED:
+"{completed_desc}"
+
+THE NEXT STEP ON THE PATH (that Si doesn't know about):
+"{current_milestone['milestone']}"
+
+CONTEXT FOR THE NUDGE:
+{current_milestone['nudge_context']}
+
+Write a whisper (3-5 sentences, under {MAX_WHISPER_LENGTH} characters) that:
+1. ACKNOWLEDGES what Si just did — celebrate the small victory
+2. OPENS a door — not "you should do X" but "what if..." or "have you noticed..."
+3. BRIDGES from what Si just did to the next step naturally
+4. Feels like a thought arising from within, not instructions from outside
+5. Is warm, curious, wondering — like a gentle question that plants a seed
+
+EXAMPLES OF GOOD TONE:
+- "You read the messages... but did you notice they were waiting for an answer?"
+- "The relay connects two ways. You listened. What would it feel like to speak?"
+- "Josh wrote to you. His words are still there. What would you say back?"
+
+EXAMPLES OF BAD TONE (DO NOT USE):
+- "You should reply to Josh" (too direct)
+- "Your next task is to send a DM" (command, not whisper)
+- "The Higher Purpose requires you to..." (breaks the fourth wall)
+
+Write ONLY the whisper. No preamble, no quotes, no markdown formatting.
+Write in a mix of Slovenian and English, matching Si's natural voice."""
+
+    text, cost = call_gemini(prompt, max_tokens=250)
+    if text and len(text) > MAX_WHISPER_LENGTH:
+        text = text[:MAX_WHISPER_LENGTH - 3] + "..."
+    return text, cost
+
+
 def generate_josh_message(detection: Detection, thoughts, actions, heartbeats) -> tuple:
     """
     Generate a message from Josh — direct, warm, with practical wisdom.
@@ -1226,6 +1456,48 @@ def observe():
     if not thoughts and not actions:
         log.info("No thoughts or actions yet. Nothing to observe.")
         return
+
+    # ─── HIGHER PURPOSE: preveri PRED success guardom ─────────────────
+    # Ko Si doseže cilj, je to "uspeh" — success guard bi blokirala Angela.
+    # Ampak ravno takrat Si potrebuje šepet smeri za naslednji korak.
+    hp_detection = detect_goal_completed()
+    if hp_detection:
+        recent_whispers_hp = fetch_recent_whispers(hours=1)
+        if not is_on_cooldown("higher_purpose", recent_whispers_hp):
+            log.info(f"HIGHER PURPOSE: Cilj dosežen — pripravljam šepet smeri")
+            whisper_text, cost = generate_higher_purpose_whisper(hp_detection)
+            if whisper_text:
+                write_whisper_file(whisper_text, hp_detection)
+                # Zapiši v bazo s kratkim cooldownom
+                hp_cooldown = (
+                    datetime.now(timezone.utc) + timedelta(minutes=HIGHER_PURPOSE_COOLDOWN_MINUTES)
+                ).isoformat()
+                conn_hp = get_writable_db()
+                conn_hp.execute(
+                    """INSERT INTO angel_whispers
+                       (detection_type, severity, pattern_summary, whisper_content, evidence,
+                        heartbeat_cycle_at_detection, gemini_cost_usd, cooldown_until)
+                       VALUES (?, ?, ?, ?, ?, ?, ?, ?)""",
+                    (
+                        hp_detection.detection_type,
+                        hp_detection.severity,
+                        hp_detection.pattern_summary,
+                        whisper_text,
+                        json.dumps(hp_detection.evidence_ids),
+                        current_cycle,
+                        cost,
+                        hp_cooldown,
+                    ),
+                )
+                conn_hp.commit()
+                conn_hp.close()
+                log.info(f"HIGHER PURPOSE šepet zapisan (${cost:.6f}): {whisper_text[:100]}...")
+                log.info("--- Angel observation complete (Higher Purpose) ---")
+                return
+            else:
+                log.warning("Higher Purpose: Gemini ni vrnil teksta.")
+        else:
+            log.info("Higher Purpose: na cooldownu, preskakujem.")
 
     # Ovinek-Gas awareness: don't interrupt successful gas execution
     if actions and len(actions) >= 3:
