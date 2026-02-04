@@ -1072,6 +1072,122 @@ def detect_philosophical_paralysis(thoughts, actions, heartbeats) -> Optional[De
 
 
 # ══════════════════════════════════════════════════════════════════════════
+# TASK AWARENESS — Zazna zastarele/obtičane naloge
+# ══════════════════════════════════════════════════════════════════════════
+
+def detect_stale_tasks(thoughts, actions, heartbeats) -> Optional[Detection]:
+    """Zazna naloge ki čakajo predolgo ali so obtičale v in_progress."""
+    try:
+        conn = get_readonly_db()
+
+        # 1. Naloge ki so in_progress že predolgo (>50 ciklov)
+        current_cycle = fetch_current_cycle(conn)
+        stale_in_progress = conn.execute("""
+            SELECT id, title, assigned_cycle, attempts
+            FROM tasks WHERE status='in_progress'
+            AND assigned_cycle IS NOT NULL
+            AND (? - assigned_cycle) > 50
+        """, (current_cycle,)).fetchall()
+
+        # 2. Pending naloge ki čakajo že zelo dolgo (>100 ciklov brez prevzema)
+        old_pending = conn.execute("""
+            SELECT id, title, timestamp
+            FROM tasks WHERE status='pending'
+            AND timestamp < datetime('now', '-6 hours')
+            ORDER BY priority ASC LIMIT 5
+        """).fetchall()
+
+        # 3. Naloge ki so failirale večkrat
+        failing_tasks = conn.execute("""
+            SELECT id, title, attempts, max_attempts
+            FROM tasks WHERE status IN ('pending', 'in_progress')
+            AND attempts >= 3
+        """).fetchall()
+
+        conn.close()
+
+        if stale_in_progress:
+            tasks_info = [f"#{dict(t)['id']}: {dict(t)['title']} (cycle {dict(t)['assigned_cycle']}, {dict(t)['attempts']} attempts)" for t in stale_in_progress]
+            return Detection(
+                detection_type="stale_tasks",
+                severity="firm",
+                pattern_summary=f"{len(stale_in_progress)} task(s) stuck in_progress for >50 cycles: {tasks_info[0]}",
+                evidence_ids=[dict(t)['id'] for t in stale_in_progress],
+                raw_data={"stale_tasks": tasks_info},
+            )
+
+        if failing_tasks:
+            tasks_info = [f"#{dict(t)['id']}: {dict(t)['title']} ({dict(t)['attempts']}/{dict(t)['max_attempts']} attempts)" for t in failing_tasks]
+            return Detection(
+                detection_type="stale_tasks",
+                severity="gentle",
+                pattern_summary=f"{len(failing_tasks)} task(s) failing repeatedly: {tasks_info[0]}",
+                evidence_ids=[dict(t)['id'] for t in failing_tasks],
+                raw_data={"failing_tasks": tasks_info},
+            )
+
+        if len(old_pending) >= 3:
+            tasks_info = [f"#{dict(t)['id']}: {dict(t)['title']}" for t in old_pending]
+            return Detection(
+                detection_type="stale_tasks",
+                severity="gentle",
+                pattern_summary=f"{len(old_pending)} pending tasks waiting >6 hours. Si might need to prioritize.",
+                evidence_ids=[dict(t)['id'] for t in old_pending],
+                raw_data={"old_pending": tasks_info},
+            )
+
+    except Exception as e:
+        log.warning(f"detect_stale_tasks error: {e}")
+
+    return None
+
+
+def detect_communication_health(thoughts, actions) -> Optional[Detection]:
+    """Zazna probleme s komunikacijo — neodgovorjena sporočila, pokvarjen DM."""
+    try:
+        conn = get_readonly_db()
+
+        # 1. Sporočila ki čakajo na odgovor več kot 30 min
+        unanswered = conn.execute("""
+            SELECT COUNT(*) FROM conversation_log
+            WHERE direction='incoming' AND responded_to=0
+            AND timestamp < datetime('now', '-30 minutes')
+        """).fetchone()
+        unanswered_count = unanswered[0] if unanswered else 0
+
+        # 2. Pending obvestila ki niso bila poslana
+        pending_notifs = conn.execute("""
+            SELECT COUNT(*) FROM conversation_log
+            WHERE direction='outgoing_pending' AND responded_to=0
+            AND timestamp < datetime('now', '-1 hour')
+        """).fetchone()
+        pending_count = pending_notifs[0] if pending_notifs else 0
+
+        conn.close()
+
+        if unanswered_count >= 3:
+            return Detection(
+                detection_type="communication_issues",
+                severity="firm",
+                pattern_summary=f"{unanswered_count} messages unanswered for >30 minutes. Communication cycle may be stuck.",
+                raw_data={"unanswered": unanswered_count},
+            )
+
+        if pending_count >= 5:
+            return Detection(
+                detection_type="communication_issues",
+                severity="gentle",
+                pattern_summary=f"{pending_count} outgoing notifications stuck pending >1 hour. DM sending may be broken.",
+                raw_data={"pending_notifications": pending_count},
+            )
+
+    except Exception as e:
+        log.warning(f"detect_communication_health error: {e}")
+
+    return None
+
+
+# ══════════════════════════════════════════════════════════════════════════
 # HIGHER PURPOSE DETECTION — Zazna dosežen cilj in pripravi šepet smeri
 # ══════════════════════════════════════════════════════════════════════════
 
@@ -1534,6 +1650,8 @@ def observe():
         ("wrong_relay", detect_wrong_relay, (thoughts, actions)),
         ("code_blocked", detect_code_blocked, (actions,)),
         ("philosophical_paralysis", detect_philosophical_paralysis, (thoughts, actions, heartbeats)),
+        ("stale_tasks", detect_stale_tasks, (thoughts, actions, heartbeats)),
+        ("communication_issues", detect_communication_health, (thoughts, actions)),
     ]:
         try:
             d = detector_fn(*args)
